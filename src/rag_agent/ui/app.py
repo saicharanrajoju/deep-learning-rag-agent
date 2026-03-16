@@ -116,28 +116,59 @@ def render_ingestion_panel(
     """
     st.sidebar.header("📂 Corpus Ingestion")
 
-    # TODO: implement
-    # 1. st.sidebar.file_uploader(
-    #        "Upload study materials",
-    #        type=["pdf", "md"],
-    #        accept_multiple_files=True
-    #    )
-    #
-    # 2. "Ingest Documents" button — only enabled when files are selected
-    #
-    # 3. On button click:
-    #    a. Save uploaded files to a temp directory
-    #    b. chunker.chunk_files(file_paths)
-    #    c. store.ingest(chunks) → IngestionResult
-    #    d. Display result: st.success / st.warning / st.error
-    #       Show: "{result.ingested} chunks added, {result.skipped} duplicates skipped"
-    #    e. Refresh ingested documents list in session_state
-    #
-    # 4. Render ingested documents list below the uploader
-    #    For each document: show source name, topic, chunk count
-    #    Add a small "🗑 Remove" button per document that calls store.delete_document()
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload study materials",
+        type=["pdf", "md"],
+        accept_multiple_files=True,
+        key="file_uploader",
+    )
+    if st.sidebar.button("Ingest Documents", disabled=not uploaded_files):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_paths = []
+            for uf in uploaded_files:
+                dest = Path(tmp_dir) / uf.name
+                dest.write_bytes(uf.read())
+                file_paths.append(dest)
+            all_chunks = []
+            progress_bar = st.sidebar.progress(0)
+            status_text = st.sidebar.empty()
+            total_files = len(file_paths)
+            
+            for i, fp in enumerate(file_paths):
+                status_text.text(f"Processing file {i+1} of {total_files}: {fp.name}")
+                try:
+                    all_chunks.extend(chunker.chunk_file(fp, {}))
+                except Exception as e:
+                    st.sidebar.error(f"Failed to chunk {fp.name}: {e}")
+                progress_bar.progress((i + 1) / total_files)
+            
+            status_text.empty()
+            progress_bar.empty()
 
-    st.sidebar.info("Upload .pdf or .md files to populate the corpus.")
+            with st.sidebar.spinner("Embedding and updating vector store..."):
+                result = store.ingest(all_chunks)
+                st.session_state["last_ingestion_result"] = result
+                st.session_state["ingested_documents"] = store.list_documents()
+
+        if result.errors:
+            for error in result.errors:
+                st.sidebar.error(error)
+        else:
+            if result.ingested > 0:
+                msg = f"✅ {result.ingested} chunks ingested from {total_files} documents"
+                if result.skipped > 0:
+                    msg += f"\n\n⏭️ {result.skipped} duplicates skipped"
+                st.sidebar.success(msg)
+            elif result.skipped > 0:
+                st.sidebar.warning(f"⏭️ {result.skipped} duplicates skipped")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📚 Ingested Documents")
+    docs = st.session_state.get("ingested_documents") or store.list_documents()
+    if not docs:
+        st.sidebar.caption("No documents ingested yet.")
+    for doc in docs:
+        st.sidebar.caption(f"**{doc['source']}** — {doc['topic']} ({doc['chunk_count']} chunks)")
 
 
 def render_corpus_stats(store: VectorStoreManager) -> None:
@@ -151,15 +182,13 @@ def render_corpus_stats(store: VectorStoreManager) -> None:
     ----------
     store : VectorStoreManager
     """
-    # TODO: implement
-    # stats = store.get_collection_stats()
-    # st.sidebar.metric("Total Chunks", stats["total_chunks"])
-    # st.sidebar.write("Topics:", ", ".join(stats["topics"]))
-    # if stats["bonus_topics_present"]:
-    #     st.sidebar.success("✅ Bonus topics present")
-    # else:
-    #     st.sidebar.warning("⚠️ No bonus topics yet")
-    pass
+    stats = store.get_collection_stats()
+    st.sidebar.metric("Total Chunks", stats["total_chunks"])
+    st.sidebar.write(f"Topics: {', '.join(stats['topics'])}")
+    if stats.get("bonus_topics_present"):
+        st.sidebar.success("✅ Bonus topics present")
+    else:
+        st.sidebar.warning("⚠️ No bonus topics yet")
 
 
 # ---------------------------------------------------------------------------
@@ -180,23 +209,20 @@ def render_document_viewer(store: VectorStoreManager) -> None:
     """
     st.subheader("📄 Document Viewer")
 
-    # TODO: implement
-    # 1. If no documents ingested: show placeholder message
-    #
-    # 2. st.selectbox("Select document", options=[doc["source"] for doc in docs])
-    #    Store selection in st.session_state["selected_document"]
-    #
-    # 3. On selection change: store.get_document_chunks(selected_source)
-    #
-    # 4. Render chunks in a scrollable container (st.container with fixed height)
-    #    For each chunk:
-    #    - Show metadata badge: topic | difficulty | type
-    #    - Show chunk text
-    #    - Show similarity score if this chunk was used in last response
-    #
-    # 5. Display chunk count and coverage summary below viewer
-
-    st.info("Ingest documents using the sidebar to view content here.")
+    docs = st.session_state.get("ingested_documents") or store.list_documents()
+    if not docs:
+        st.info("Ingest documents using the sidebar to view content here.")
+        return
+    sources = [d["source"] for d in docs]
+    selected = st.selectbox("Select document", options=sources, key="doc_selector")
+    st.session_state["selected_document"] = selected
+    if selected:
+        chunks = store.get_document_chunks(selected)
+        st.caption(f"{len(chunks)} chunks from **{selected}**")
+        with st.container(height=500):
+            for chunk in chunks:
+                with st.expander(f"[{chunk.metadata.topic} | {chunk.metadata.difficulty} | {chunk.metadata.type}]"):
+                    st.write(chunk.chunk_text)
 
 
 # ---------------------------------------------------------------------------
@@ -223,11 +249,15 @@ def render_chat_interface(graph) -> None:
     # Filters
     col_topic, col_diff = st.columns(2)
     with col_topic:
-        # TODO: st.selectbox for topic filter
-        pass
+        st.session_state["topic_filter"] = st.selectbox(
+            "Topic filter", ["(all)", "ANN", "CNN", "RNN", "LSTM", "Seq2Seq", "Autoencoder"],
+            key="topic_sel"
+        ) or None
     with col_diff:
-        # TODO: st.selectbox for difficulty filter
-        pass
+        st.session_state["difficulty_filter"] = st.selectbox(
+            "Difficulty", ["(all)", "beginner", "intermediate", "advanced"],
+            key="diff_sel"
+        ) or None
 
     # Chat history display
     chat_container = st.container(height=400)
@@ -235,30 +265,98 @@ def render_chat_interface(graph) -> None:
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-                if message.get("sources"):
-                    with st.expander("📎 Sources"):
+                if message["role"] == "assistant":
+                    if message.get("no_context_found"):
+                        st.warning("⚠️ No relevant content found in the corpus. Try rephrasing with a specific deep learning term.")
+                    
+                    if message.get("sources"):
                         for source in message["sources"]:
                             st.caption(source)
-                if message.get("no_context_found"):
-                    st.warning("⚠️ No relevant content found in corpus.")
+                    
+                    if message.get("confidence") is not None:
+                        st.caption(f"Confidence: {message['confidence']:.2f}")
+                    
+                    if message.get("rewritten_query") and message["rewritten_query"] != message.get("original_query"):
+                        with st.expander("🔍 Query rewritten to"):
+                            st.write(message["rewritten_query"])
 
-    # Chat input
-    # TODO: implement
-    # 1. query = st.chat_input("Ask about a deep learning topic...")
-    #
-    # 2. On submit:
-    #    a. Append user message to chat_history
-    #    b. Display user message immediately (st.rerun or direct render)
-    #    c. Build LangGraph input:
-    #       {"messages": [HumanMessage(content=query)]}
-    #    d. config = {"configurable": {"thread_id": st.session_state.thread_id}}
-    #    e. result = graph.invoke(input, config=config)
-    #    f. response = result["final_response"]
-    #    g. Append assistant message with answer, sources, no_context_found flag
-    #
-    # STRETCH GOAL — streaming:
-    # Replace graph.invoke with graph.stream() and use st.write_stream()
-    # to display tokens as they arrive. Significant "wow factor" in Hour 3.
+    query = st.chat_input("Ask about a deep learning topic...")
+    if query:
+        st.session_state.chat_history.append({"role": "user", "content": query})
+        
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(query)
+
+        topic = st.session_state.get("topic_filter")
+        diff = st.session_state.get("difficulty_filter")
+        topic = None if topic == "(all)" else topic
+        diff = None if diff == "(all)" else diff
+        with st.spinner("Thinking..."):
+            from langchain_core.messages import HumanMessage as HM
+            graph_input = {
+                "messages": [HM(content=query)],
+                "topic_filter": topic,
+                "difficulty_filter": diff,
+            }
+            config = {"configurable": {"thread_id": st.session_state.thread_id}}
+            
+            response = None
+            
+            with chat_container:
+                with st.chat_message("assistant"):
+                    try:
+                        def generate_stream():
+                            nonlocal response
+                            for event in graph.stream(graph_input, config=config):
+                                for node_name, state in event.items():
+                                    if state and "final_response" in state:
+                                        response = state["final_response"]
+                                        if response and response.answer:
+                                            yield response.answer
+                        st.write_stream(generate_stream)
+                    except Exception:
+                        try:
+                            result = graph.invoke(graph_input, config=config)
+                            response = result.get("final_response")
+                            if response:
+                                st.markdown(response.answer)
+                        except Exception as e:
+                            st.error(f"Something went wrong: {e}")
+
+                    if response:
+                        if response.no_context_found:
+                            st.warning("⚠️ No relevant content found in the corpus. Try rephrasing with a specific deep learning term.")
+                        if response.sources:
+                            for source in response.sources:
+                                st.caption(source)
+                        if response.confidence is not None:
+                            st.caption(f"Confidence: {response.confidence:.2f}")
+                        if response.rewritten_query and response.rewritten_query != query:
+                            with st.expander("🔍 Query rewritten to"):
+                                st.write(response.rewritten_query)
+
+        if response:
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": response.answer,
+                "sources": response.sources,
+                "confidence": response.confidence,
+                "no_context_found": response.no_context_found,
+                "rewritten_query": response.rewritten_query,
+                "original_query": query,
+            })
+        else:
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": "I was unable to process your query. Please try again.",
+                "sources": [],
+                "confidence": 0.0,
+                "no_context_found": True,
+                "rewritten_query": "",
+                "original_query": query,
+            })
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
