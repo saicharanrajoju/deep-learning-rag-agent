@@ -86,7 +86,10 @@ class Settings(BaseSettings):
     )
 
     # Retrieval
-    retrieval_k: int = Field(default=4, alias="RETRIEVAL_K")
+    retrieval_k: int = Field(default=15, alias="RETRIEVAL_K")  # Increased for initial recall before reranking
+    rerank_top_k: int = Field(default=4, alias="RERANK_TOP_K") # Final chunks passed to generation
+    bm25_weight: float = Field(default=0.3, alias="BM25_WEIGHT") # Ensemble weight for BM25 (dense vectors = 1 - bm25_weight)
+    max_retries: int = Field(default=2, alias="MAX_RETRIES")   # Graph self-RAG rewrite retries
     similarity_threshold: float = Field(
         default=0.3, alias="SIMILARITY_THRESHOLD"
     )

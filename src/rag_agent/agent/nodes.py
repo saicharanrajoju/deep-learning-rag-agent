@@ -56,17 +56,20 @@ def query_rewrite_node(state: AgentState) -> dict:
         Updates: original_query, rewritten_query.
     """
     from rag_agent.agent.prompts import QUERY_REWRITE_PROMPT
+    retries = state.get("retries", 0)
     human_messages = [m for m in state["messages"] if isinstance(m, HumanMessage)]
     original_query = human_messages[-1].content if human_messages else ""
     try:
         settings = get_settings()
         llm = LLMFactory(settings).create()
         prompt = QUERY_REWRITE_PROMPT.format(original_query=original_query)
+        if retries > 0:
+            prompt += f"\n\nNote: Previous retrieval attempts failed. Please broaden the search terminology, use higher-level synonyms, or approach the query from a different angle."
         result = llm.invoke([HumanMessage(content=prompt)])
         rewritten = result.content.strip()
     except Exception:
         rewritten = original_query
-    return {"original_query": original_query, "rewritten_query": rewritten}
+    return {"original_query": original_query, "rewritten_query": rewritten, "retries": retries + 1}
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +108,21 @@ def retrieval_node(state: AgentState) -> dict:
     )
     if not chunks:
         return {"retrieved_chunks": [], "no_context_found": True}
-    return {"retrieved_chunks": chunks, "no_context_found": False}
+        
+    from rag_agent.agent.prompts import DOCUMENT_GRADER_PROMPT
+    settings = get_settings()
+    try:
+        llm = LLMFactory(settings).create()
+        context_str = "\n\n".join(c.chunk_text for c in chunks)
+        prompt = DOCUMENT_GRADER_PROMPT.format(context=context_str, question=state["original_query"])
+        result = llm.invoke([HumanMessage(content=prompt)])
+        if "yes" in result.content.lower():
+            return {"retrieved_chunks": chunks, "no_context_found": False}
+        else:
+            return {"retrieved_chunks": [], "no_context_found": True}
+    except Exception:
+        # Fallback to true if grading fails
+        return {"retrieved_chunks": chunks, "no_context_found": False}
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +211,7 @@ def generation_node(state: AgentState) -> dict:
         confidence=avg_score,
         no_context_found=False,
         rewritten_query=state.get("rewritten_query", ""),
+        retries=state.get("retries", 0),
     )
     return {
         "final_response": response,
@@ -228,12 +246,15 @@ def should_retry_retrieval(state: AgentState) -> str:
     str
         "generate" — proceed to generation_node.
         "end"      — skip generation, return no_context response directly.
+        "retry"    — loop back to query_rewrite_node.
 
     Notes
     -----
-    Retry logic should be limited to one attempt to prevent infinite loops.
-    Track retry count in AgentState if implementing retry behaviour.
+    Retry logic prevents infinite loops by checking state.retries against settings.max_retries.
     """
+    settings = get_settings()
     if state.get("no_context_found", False):
+        if state.get("retries", 0) <= settings.max_retries:
+            return "retry"
         return "end"
     return "generate"

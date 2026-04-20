@@ -142,6 +142,28 @@ Scoring: 9-10 complete, 7-8 mostly correct, 5-6 core understood,
 Respond with the JSON object only. No preamble, no explanation, no markdown code fences."""
 
 # ---------------------------------------------------------------------------
+# Document Grader Prompt (Self-RAG)
+# ---------------------------------------------------------------------------
+
+"""
+Purpose: Grades the relevance of retrieved documents to the query.
+Input variables: {context}, {question}
+Expected output format: 'yes' or 'no'
+Failure mode & mitigation: The model outputs long explanations instead of binary.
+Mitigated by strict instruction to output only 'yes' or 'no'.
+"""
+DOCUMENT_GRADER_PROMPT = """You are a grader assessing relevance of a retrieved document to a user question. \
+If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. \
+
+Retrieved document:
+{context}
+
+User question: {question}
+
+Either 'yes' or 'no' to indicate whether the document is relevant to the question. \
+Output ONLY 'yes' or 'no', nothing else."""
+
+# ---------------------------------------------------------------------------
 # Hallucination Guard Message
 # ---------------------------------------------------------------------------
 

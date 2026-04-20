@@ -214,6 +214,7 @@ class AgentResponse:
     confidence: float = 0.0
     no_context_found: bool = False
     rewritten_query: str = ""
+    retries: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -264,3 +265,4 @@ class AgentState(MessagesState):
     final_response: AgentResponse | None = None
     topic_filter: str | None = None
     difficulty_filter: str | None = None
+    retries: int = 0

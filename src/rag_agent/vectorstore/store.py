@@ -85,6 +85,29 @@ class VectorStoreManager:
             f"ChromaDB initialised: '{self._settings.chroma_collection_name}' "
             f"with {self._collection.count()} items"
         )
+        self._build_bm25()
+
+    def _build_bm25(self) -> None:
+        """
+        Build an in-memory BM25 index of all current chunk documents.
+        Used for the sparse keyword half of our Hybrid Search strategy.
+        """
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError:
+            self._bm25 = None
+            return
+
+        all_data = self._collection.get(include=["documents", "metadatas"])
+        self._bm25_docs = all_data.get("documents", [])
+        self._bm25_ids = all_data.get("ids", [])
+        self._bm25_metadata = all_data.get("metadatas", [])
+        
+        if self._bm25_docs:
+            tokenized_corpus = [doc.lower().split() for doc in self._bm25_docs]
+            self._bm25 = BM25Okapi(tokenized_corpus)
+        else:
+            self._bm25 = None
 
     # -----------------------------------------------------------------------
     # Duplicate Detection
@@ -191,6 +214,8 @@ class VectorStoreManager:
             f"Ingestion done: {result.ingested} ingested, "
             f"{result.skipped} skipped, {len(result.errors)} errors"
         )
+        if result.ingested > 0 or result.deleted > 0 if hasattr(result, 'deleted') else False:
+            self._build_bm25()
         return result
 
     # -----------------------------------------------------------------------
@@ -244,25 +269,93 @@ class VectorStoreManager:
         elif difficulty_filter:
             where_filter = {"difficulty": difficulty_filter}
         query_embedding = self._embeddings.embed_query(query_text)
-        results = self._collection.query(
+        
+        # 1. Dense Retrieval (ChromaDB)
+        dense_results = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=k,
             where=where_filter,
             include=["documents", "metadatas", "distances"]
         )
-        chunks = []
-        for i, chunk_id in enumerate(results["ids"][0]):
-            score = 1 - results["distances"][0][i]
+        
+        candidate_pool = {}  # chunk_id -> chunk dict
+        
+        if dense_results and dense_results["ids"] and dense_results["ids"][0]:
+            for i, chunk_id in enumerate(dense_results["ids"][0]):
+                score = 1 - dense_results["distances"][0][i]
+                metadata = ChunkMetadata.from_dict(dense_results["metadatas"][0][i])
+                candidate_pool[chunk_id] = {
+                    "id": chunk_id,
+                    "text": dense_results["documents"][0][i],
+                    "metadata": metadata,
+                    "dense_score": score
+                }
+
+        # 2. Sparse Retrieval (BM25)
+        if hasattr(self, "_bm25") and self._bm25 is not None and query_text:
+            tokenized_query = query_text.lower().split()
+            bm25_scores = self._bm25.get_scores(tokenized_query)
+            import numpy as np
+            # Get top k indices
+            top_k_indices = np.argsort(bm25_scores)[-k:][::-1]
+            for idx in top_k_indices:
+                score = bm25_scores[idx]
+                if score > 0:
+                    chunk_id = self._bm25_ids[idx]
+                    metadata = ChunkMetadata.from_dict(self._bm25_metadata[idx])
+                    
+                    # Apply where_filter locally
+                    if topic_filter and metadata.topic != topic_filter:
+                        continue
+                    if difficulty_filter and metadata.difficulty != difficulty_filter:
+                        continue
+                        
+                    if chunk_id not in candidate_pool:
+                        candidate_pool[chunk_id] = {
+                            "id": chunk_id,
+                            "text": self._bm25_docs[idx],
+                            "metadata": metadata,
+                            "dense_score": 0.0
+                        }
+
+        if not candidate_pool:
+            return []
+
+        # 3. Cross-Encoder Re-Ranking (FlashRank)
+        candidates_for_rerank = [{"id": v["id"], "text": v["text"]} for v in candidate_pool.values()]
+        
+        try:
+            from flashrank import Ranker, RerankRequest
+            ranker = Ranker()
+            rerank_request = RerankRequest(query=query_text, passages=candidates_for_rerank)
+            reranked_results = ranker.rerank(rerank_request)
+        except Exception as e:
+            logger.error(f"Reranking failed: {e}. Falling back to dense scores.")
+            reranked_results = sorted(
+                [{"id": v["id"], "score": v["dense_score"]} for v in candidate_pool.values()],
+                key=lambda x: x["score"],
+                reverse=True
+            )
+
+        # 4. Final selection and formatting
+        final_chunks = []
+        # Return top K from reranked
+        top_k = self._settings.rerank_top_k
+        for res in reranked_results[:top_k]:
+            chunk_id = str(res["id"])
+            score = float(res.get("score", 0.0))
             if score < self._settings.similarity_threshold:
                 continue
-            metadata = ChunkMetadata.from_dict(results["metadatas"][0][i])
-            chunks.append(RetrievedChunk(
+            
+            chunk_data = candidate_pool[chunk_id]
+            final_chunks.append(RetrievedChunk(
                 chunk_id=chunk_id,
-                chunk_text=results["documents"][0][i],
-                metadata=metadata,
+                chunk_text=chunk_data["text"],
+                metadata=chunk_data["metadata"],
                 score=score,
             ))
-        return sorted(chunks, key=lambda c: c.score, reverse=True)
+            
+        return final_chunks
 
     # -----------------------------------------------------------------------
     # Corpus Inspection
@@ -361,4 +454,6 @@ class VectorStoreManager:
         after = self._collection.count()
         deleted = before - after
         logger.info(f"Deleted {deleted} chunks for source: {source}")
+        if deleted > 0:
+            self._build_bm25()
         return deleted

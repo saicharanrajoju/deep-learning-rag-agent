@@ -20,7 +20,6 @@ from rag_agent.agent.nodes import (
     generation_node,
     query_rewrite_node,
     retrieval_node,
-    should_retry_retrieval,
 )
 from rag_agent.agent.state import AgentState
 
@@ -92,12 +91,17 @@ generation_node  [END]   ← hallucination guard fires here
         graph.add_node("query_rewrite", query_rewrite_node)
         graph.add_node("retrieval", retrieval_node)
         graph.add_node("generation", generation_node)
+        from rag_agent.agent.nodes import should_retry_retrieval
         graph.add_edge(START, "query_rewrite")
         graph.add_edge("query_rewrite", "retrieval")
         graph.add_conditional_edges(
             "retrieval",
             should_retry_retrieval,
-            {"generate": "generation", "end": END}
+            {
+                "generate": "generation",
+                "end": "generation",
+                "retry": "query_rewrite",
+            }
         )
         graph.add_edge("generation", END)
         return graph.compile(checkpointer=self._checkpointer)

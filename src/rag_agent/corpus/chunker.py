@@ -16,7 +16,7 @@ from pathlib import Path
 from loguru import logger
 
 from rag_agent.agent.state import ChunkMetadata, DocumentChunk
-from rag_agent.config import Settings, get_settings
+from rag_agent.config import EmbeddingFactory, Settings, get_settings
 from rag_agent.vectorstore.store import VectorStoreManager
 
 
@@ -52,6 +52,7 @@ class DocumentChunker:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
+        self._embeddings = EmbeddingFactory(self._settings).create()
 
     # -----------------------------------------------------------------------
     # Public Interface
@@ -185,17 +186,17 @@ class DocumentChunker:
             to DocumentChunk objects.
         """
         from langchain_community.document_loaders import PyPDFLoader
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        from langchain_experimental.text_splitter import SemanticChunker
         loader = PyPDFLoader(str(file_path))
         pages = loader.load()
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size, chunk_overlap=chunk_overlap
-        )
+        splitter = SemanticChunker(self._embeddings)
         result = []
         for page in pages:
-            for chunk_text in splitter.split_text(page.page_content):
+            # Note: For long pages, semantic chunker will chunk based on meaning sentences
+            chunks = splitter.split_text(page.page_content)
+            for chunk_text in chunks:
                 cleaned = chunk_text.strip()
-                if len(cleaned.split()) >= 50:
+                if len(cleaned.split()) >= 10:  # Relax length constraint for semantic chunks
                     result.append({"text": cleaned, "page": page.metadata.get("page", 0)})
         return result
 
@@ -227,20 +228,20 @@ class DocumentChunker:
         list[dict]
             Raw dicts with 'text' and 'header' keys.
         """
-        from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+        from langchain_text_splitters import MarkdownHeaderTextSplitter
+        from langchain_experimental.text_splitter import SemanticChunker
         headers = [("#", "h1"), ("##", "h2"), ("###", "h3")]
         splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers)
         text = file_path.read_text(encoding="utf-8")
         splits = splitter.split_text(text)
-        char_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size, chunk_overlap=chunk_overlap
-        )
+        semantic_splitter = SemanticChunker(self._embeddings)
         result = []
         for doc in splits:
             header = doc.metadata.get("h2") or doc.metadata.get("h1") or ""
-            for sub in char_splitter.split_text(doc.page_content):
+            chunks = semantic_splitter.split_text(doc.page_content)
+            for sub in chunks:
                 result.append({"text": sub.strip(), "header": header})
-        return [r for r in result if len(r["text"].split()) >= 50]
+        return [r for r in result if len(r["text"].split()) >= 10]
 
     # -----------------------------------------------------------------------
     # Metadata Inference
